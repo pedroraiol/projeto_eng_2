@@ -1,102 +1,131 @@
 import cv2
+import dlib
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Configura backend não interativo
-from matplotlib import pyplot as plt
-import os
+from scipy.spatial import distance as dist
+from imutils import face_utils
+import time
+import pygame  # Para alertas sonoros
 
-def detectar_alagamento(imagem_path, mostrar_processamento=False):
-    # Carregar a imagem
-    img = cv2.imread(imagem_path)
-    if img is None:
-        print(f"Erro ao carregar a imagem: {imagem_path}")
-        return None
-    
-    # Converter para escala de cinza
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # Aplicar blur para reduzir ruído
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Detecção de bordas com Canny
-    edges = cv2.Canny(blurred, 50, 150)
-    
-    # Segmentação por cor (para identificar água)
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    
-    # Definir faixas de cor para água (ajuste conforme necessário)
-    lower_blue = np.array([90, 50, 50])
-    upper_blue = np.array([130, 255, 255])
-    
-    # Criar máscara para regiões com cor de água
-    mask = cv2.inRange(hsv, lower_blue, upper_blue)
-    
-    # Operações morfológicas para melhorar a máscara
-    kernel = np.ones((5,5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    
-    # Encontrar contornos na máscara
-    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Filtrar contornos por área (remover pequenos ruídos)
-    min_area = 500  # Ajuste conforme o tamanho esperado de alagamentos
-    water_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
-    
-    # Desenhar contornos na imagem original
-    resultado = img.copy()
-    cv2.drawContours(resultado, water_contours, -1, (0, 255, 0), 3)
-    
-    # Adicionar texto se alagamento for detectado
-    if len(water_contours) > 0:
-        cv2.putText(resultado, "ALAGAMENTO DETECTADO!", (50, 50), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
-    
-    if mostrar_processamento:
-        # Salvar etapas do processamento como imagem
-        plt.figure(figsize=(15, 10))
-        
-        plt.subplot(231), plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)), plt.title('Original')
-        plt.subplot(232), plt.imshow(gray, cmap='gray'), plt.title('Escala de Cinza')
-        plt.subplot(233), plt.imshow(edges, cmap='gray'), plt.title('Bordas Detectadas')
-        plt.subplot(234), plt.imshow(mask, cmap='gray'), plt.title('Máscara de Água')
-        plt.subplot(235), plt.imshow(cv2.cvtColor(resultado, cv2.COLOR_BGR2RGB)), plt.title('Resultado')
-        
-        plt.tight_layout()
-        plt.savefig('etapas_processamento.png')
-        plt.close()
-        print("Etapas de processamento salvas como 'etapas_processamento.png'")
-    
-    return resultado
+# Inicializar pygame para alertas sonoros
+pygame.mixer.init()
+alerta_sonoro = pygame.mixer.Sound('alarme.mp3')  
 
-def main():
-    # Caminho para a imagem (ajuste para seu caso)
-    imagem_path = 'cratera1.webp'  # Assumindo que está na mesma pasta
-    
-    # Verificar se o arquivo existe
-    if not os.path.exists(imagem_path):
-        print(f"Erro: Arquivo {imagem_path} não encontrado!")
-        print("Certifique-se que:")
-        print(f"1. O arquivo está na pasta: {os.getcwd()}")
-        print("2. O nome do arquivo está correto (incluindo extensão)")
-        return
-    
-    # Processar imagem
-    print(f"Processando imagem: {imagem_path}")
-    resultado = detectar_alagamento(imagem_path, mostrar_processamento=True)
-    
-    if resultado is not None:
-        # Salvar resultado
-        cv2.imwrite('resultado_alagamento.jpg', resultado)
-        print("Resultado salvo como 'resultado_alagamento.jpg'")
-        
-        # Mostrar mensagem final
-        print("\nProcesso concluído com sucesso!")
-        print("Arquivos gerados:")
-        print("- resultado_alagamento.jpg (resultado final)")
-        print("- etapas_processamento.png (etapas do processamento)")
-    else:
-        print("Falha no processamento da imagem")
+# Constantes para detecção de sonolência
+FECHAMENTO_OLHAR_THRESH = 0.25  # Limiar para considerar olhos fechados
+FECHAMENTO_OLHAR_CONSEC_FRAMES = 20  # Número de frames consecutivos para considerar sonolência
+BOCEJO_THRESH = 0.5  # Limiar para considerar bocejo
+BOCEJO_CONSEC_FRAMES = 15  # Número de frames para considerar bocejo
 
-if __name__ == "__main__":
-    main()
+# Contadores
+contador_fechamento = 0
+contador_bocejo = 0
+alerta_sonolencia = False
+
+# Inicializar detector de faces e pontos faciais
+detector_faces = dlib.get_frontal_face_detector()
+predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")  # Modelo pré-treinado
+
+# Índices dos pontos faciais para olhos e boca
+(l_inicio, l_fim) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
+(r_inicio, r_fim) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
+(boca_inicio, boca_fim) = face_utils.FACIAL_LANDMARKS_IDXS["mouth"]
+
+def calcular_ear(olho):
+    # Calcula a proporção de abertura do olho (Eye Aspect Ratio)
+    A = dist.euclidean(olho[1], olho[5])
+    B = dist.euclidean(olho[2], olho[4])
+    C = dist.euclidean(olho[0], olho[3])
+    ear = (A + B) / (2.0 * C)
+    return ear
+
+def calcular_mar(boca):
+    # Calcula a proporção de abertura da boca (Mouth Aspect Ratio)
+    A = dist.euclidean(boca[2], boca[10])  # 51, 59
+    B = dist.euclidean(boca[4], boca[8])   # 53, 57
+    C = dist.euclidean(boca[0], boca[6])   # 49, 55
+    mar = (A + B) / (2.0 * C)
+    return mar
+
+# Iniciar captura de vídeo da webcam
+cap = cv2.VideoCapture(0)
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+        
+    # Redimensionar e converter para escala de cinza
+    frame = cv2.resize(frame, (640, 480))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Detectar faces
+    rects = detector_faces(gray, 0)
+    
+    for rect in rects:
+        shape = predictor(gray, rect)
+        shape = face_utils.shape_to_np(shape)
+        
+        # Extrair coordenadas dos olhos e calcular EAR
+        olho_esquerdo = shape[l_inicio:l_fim]
+        olho_direito = shape[r_inicio:r_fim]
+        ear_esquerdo = calcular_ear(olho_esquerdo)
+        ear_direito = calcular_ear(olho_direito)
+        
+        # EAR médio
+        ear_medio = (ear_esquerdo + ear_direito) / 2.0
+        
+        # Extrair coordenadas da boca e calcular MAR
+        boca = shape[boca_inicio:boca_fim]
+        mar = calcular_mar(boca)
+        
+        # Desenhar contornos dos olhos e boca
+        olho_esquerdo_hull = cv2.convexHull(olho_esquerdo)
+        olho_direito_hull = cv2.convexHull(olho_direito)
+        boca_hull = cv2.convexHull(boca)
+        cv2.drawContours(frame, [olho_esquerdo_hull], -1, (0, 255, 0), 1)
+        cv2.drawContours(frame, [olho_direito_hull], -1, (0, 255, 0), 1)
+        cv2.drawContours(frame, [boca_hull], -1, (0, 255, 0), 1)
+        
+        # Verificar se EAR está abaixo do limiar (olhos fechados)
+        if ear_medio < FECHAMENTO_OLHAR_THRESH:
+            contador_fechamento += 1
+            
+            # Se olhos fechados por muitos frames consecutivos
+            if contador_fechamento >= FECHAMENTO_OLHAR_CONSEC_FRAMES:
+                cv2.putText(frame, "ALERTA: SONOLENCIA DETECTADA!", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                alerta_sonolencia = True
+                
+                # Tocar alerta sonoro
+                alerta_sonoro.play()
+        else:
+            contador_fechamento = 0
+            alerta_sonolencia = False
+            
+        # Verificar bocejo
+        if mar > BOCEJO_THRESH:
+            contador_bocejo += 1
+            
+            if contador_bocejo >= BOCEJO_CONSEC_FRAMES:
+                cv2.putText(frame, "ALERTA: BOCEJO DETECTADO!", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                alerta_sonolencia = True
+                alerta_sonoro.play()
+        else:
+            contador_bocejo = 0
+            
+        # Mostrar EAR e MAR no frame
+        cv2.putText(frame, f"EAR: {ear_medio:.2f}", (500, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        cv2.putText(frame, f"MAR: {mar:.2f}", (500, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    
+    # Mostrar frame
+    cv2.imshow("Detector de Sonolencia", frame)
+    
+    # Sair ao pressionar 'q'
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
