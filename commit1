@@ -1,12 +1,15 @@
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Configura backend não interativo
 from matplotlib import pyplot as plt
+import os
 
 def detectar_alagamento(imagem_path, mostrar_processamento=False):
     # Carregar a imagem
     img = cv2.imread(imagem_path)
     if img is None:
-        print("Erro ao carregar a imagem.")
+        print(f"Erro ao carregar a imagem: {imagem_path}")
         return None
     
     # Converter para escala de cinza
@@ -50,7 +53,7 @@ def detectar_alagamento(imagem_path, mostrar_processamento=False):
                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
     
     if mostrar_processamento:
-        # Mostrar etapas do processamento
+        # Salvar etapas do processamento como imagem
         plt.figure(figsize=(15, 10))
         
         plt.subplot(231), plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)), plt.title('Original')
@@ -60,14 +63,40 @@ def detectar_alagamento(imagem_path, mostrar_processamento=False):
         plt.subplot(235), plt.imshow(cv2.cvtColor(resultado, cv2.COLOR_BGR2RGB)), plt.title('Resultado')
         
         plt.tight_layout()
-        plt.show()
+        plt.savefig('etapas_processamento.png')
+        plt.close()
+        print("Etapas de processamento salvas como 'etapas_processamento.png'")
     
     return resultado
 
-# Exemplo de uso
-imagem_path = 'rua_com_alagamento.jpg'  # Substitua pelo caminho da sua imagem
-resultado = detectar_alagamento(imagem_path, mostrar_processamento=True)
+def main():
+    # Caminho para a imagem (ajuste para seu caso)
+    imagem_path = 'cratera1.webp'  # Assumindo que está na mesma pasta
+    
+    # Verificar se o arquivo existe
+    if not os.path.exists(imagem_path):
+        print(f"Erro: Arquivo {imagem_path} não encontrado!")
+        print("Certifique-se que:")
+        print(f"1. O arquivo está na pasta: {os.getcwd()}")
+        print("2. O nome do arquivo está correto (incluindo extensão)")
+        return
+    
+    # Processar imagem
+    print(f"Processando imagem: {imagem_path}")
+    resultado = detectar_alagamento(imagem_path, mostrar_processamento=True)
+    
+    if resultado is not None:
+        # Salvar resultado
+        cv2.imwrite('resultado_alagamento.jpg', resultado)
+        print("Resultado salvo como 'resultado_alagamento.jpg'")
+        
+        # Mostrar mensagem final
+        print("\nProcesso concluído com sucesso!")
+        print("Arquivos gerados:")
+        print("- resultado_alagamento.jpg (resultado final)")
+        print("- etapas_processamento.png (etapas do processamento)")
+    else:
+        print("Falha no processamento da imagem")
 
-# Salvar resultado
-if resultado is not None:
-    cv2.imwrite('resultado_alagamento.jpg', resultado)
+if __name__ == "__main__":
+    main()
