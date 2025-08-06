@@ -1,0 +1,73 @@
+import cv2
+import numpy as np
+from matplotlib import pyplot as plt
+
+def detectar_alagamento(imagem_path, mostrar_processamento=False):
+    # Carregar a imagem
+    img = cv2.imread(imagem_path)
+    if img is None:
+        print("Erro ao carregar a imagem.")
+        return None
+    
+    # Converter para escala de cinza
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # Aplicar blur para reduzir ruído
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Detecção de bordas com Canny
+    edges = cv2.Canny(blurred, 50, 150)
+    
+    # Segmentação por cor (para identificar água)
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    
+    # Definir faixas de cor para água (ajuste conforme necessário)
+    lower_blue = np.array([90, 50, 50])
+    upper_blue = np.array([130, 255, 255])
+    
+    # Criar máscara para regiões com cor de água
+    mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    
+    # Operações morfológicas para melhorar a máscara
+    kernel = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    
+    # Encontrar contornos na máscara
+    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Filtrar contornos por área (remover pequenos ruídos)
+    min_area = 500  # Ajuste conforme o tamanho esperado de alagamentos
+    water_contours = [cnt for cnt in contours if cv2.contourArea(cnt) > min_area]
+    
+    # Desenhar contornos na imagem original
+    resultado = img.copy()
+    cv2.drawContours(resultado, water_contours, -1, (0, 255, 0), 3)
+    
+    # Adicionar texto se alagamento for detectado
+    if len(water_contours) > 0:
+        cv2.putText(resultado, "ALAGAMENTO DETECTADO!", (50, 50), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+    
+    if mostrar_processamento:
+        # Mostrar etapas do processamento
+        plt.figure(figsize=(15, 10))
+        
+        plt.subplot(231), plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)), plt.title('Original')
+        plt.subplot(232), plt.imshow(gray, cmap='gray'), plt.title('Escala de Cinza')
+        plt.subplot(233), plt.imshow(edges, cmap='gray'), plt.title('Bordas Detectadas')
+        plt.subplot(234), plt.imshow(mask, cmap='gray'), plt.title('Máscara de Água')
+        plt.subplot(235), plt.imshow(cv2.cvtColor(resultado, cv2.COLOR_BGR2RGB)), plt.title('Resultado')
+        
+        plt.tight_layout()
+        plt.show()
+    
+    return resultado
+
+# Exemplo de uso
+imagem_path = 'rua_com_alagamento.jpg'  # Substitua pelo caminho da sua imagem
+resultado = detectar_alagamento(imagem_path, mostrar_processamento=True)
+
+# Salvar resultado
+if resultado is not None:
+    cv2.imwrite('resultado_alagamento.jpg', resultado)
