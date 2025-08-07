@@ -1,0 +1,217 @@
+import cv2
+import dlib
+import numpy as np
+from scipy.spatial import distance as dist
+from imutils import face_utils
+import time
+import pygame
+import os
+from collections import deque
+
+# Configurações avançadas
+pygame.mixer.init()
+alerta_sonoro = pygame.mixer.Sound('alarme.mp3')
+
+# Constantes otimizadas
+FECHAMENTO_OLHAR_THRESH = 0.23  # Limiar para considerar olhos fechados
+BOCEJO_THRESH = 0.45            # Limiar ajustado
+FATOR_EXPANSAO_OLHO = 1.7       # Área para captura
+HISTORICO_FRAMES = 16           # Tamanho do buffer para suavização
+
+# Sistema de buffer para suavização
+ear_buffer = deque(maxlen=HISTORICO_FRAMES)
+mar_buffer = deque(maxlen=HISTORICO_FRAMES)
+
+# Contadores inteligentes
+contador_fechamento = 0
+contador_bocejo = 0
+alerta_sonolencia = False
+ultimo_alerta = 0
+
+# Carregamento robusto do modelo
+MODEL_PATH = "shape_predictor_68_face_landmarks.dat"
+if not os.path.exists(MODEL_PATH):
+    print(f"Erro: Arquivo do modelo não encontrado em {MODEL_PATH}")
+    exit(1)
+
+try:
+    detector_faces = dlib.get_frontal_face_detector()
+    predictor = dlib.shape_predictor(MODEL_PATH)
+except Exception as e:
+    print(f"Erro ao carregar modelos: {e}")
+    exit(1)
+
+# Índices faciais
+(l_inicio, l_fim) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
+(r_inicio, r_fim) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
+(boca_inicio, boca_fim) = face_utils.FACIAL_LANDMARKS_IDXS["mouth"]
+
+def calcular_ear(olho):
+    """Cálculo robusto de EAR com verificação de qualidade"""
+    try:
+        A = dist.euclidean(olho[1], olho[5])
+        B = dist.euclidean(olho[2], olho[4])
+        C = dist.euclidean(olho[0], olho[3])
+        
+        # Verificação de qualidade dos pontos
+        if C < 5 or A == 0 or B == 0:
+            return None
+            
+        ear = (A + B) / (2.0 * C)
+        return ear
+    except:
+        return None
+
+def calcular_mar(boca):
+    """Cálculo de MAR com verificação de qualidade"""
+    try:
+        A = dist.euclidean(boca[2], boca[10])
+        B = dist.euclidean(boca[4], boca[8])
+        C = dist.euclidean(boca[0], boca[6])
+        
+        if C < 10 or A == 0 or B == 0:
+            return None
+            
+        mar = (A + B) / (2.0 * C)
+        return mar
+    except:
+        return None
+
+def expandir_roi(pontos, fator=1.7):
+    """Expansão inteligente da ROI com limites seguros"""
+    try:
+        x_coords = [p[0] for p in pontos]
+        y_coords = [p[1] for p in pontos]
+        
+        centro_x = sum(x_coords) // len(pontos)
+        centro_y = sum(y_coords) // len(pontos)
+        
+        novo_pontos = []
+        for (x, y) in pontos:
+            dx = x - centro_x
+            dy = y - centro_y
+            novo_x = centro_x + int(dx * fator)
+            novo_y = centro_y + int(dy * fator)
+            novo_pontos.append((novo_x, novo_y))
+        
+        return np.array(novo_pontos)
+    except:
+        return pontos
+
+def verificar_qualidade_deteccao(shape, frame_shape):
+    """Verifica se os pontos faciais são válidos"""
+    if shape is None or len(shape) != 68:
+        return False
+    
+    # Verifica se os pontos estão dentro do frame
+    for (x, y) in shape:
+        if x < 0 or y < 0 or x >= frame_shape[1] or y >= frame_shape[0]:
+            return False
+    return True
+
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+# Pré-aquecimento da câmera
+for _ in range(10):
+    cap.read()
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        continue
+        
+    frame = cv2.resize(frame, (640, 480))
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Pré-processamento
+    gray = cv2.equalizeHist(gray)
+    gray = cv2.GaussianBlur(gray, (3, 3), 0)
+    
+    rects = detector_faces(gray, 0)
+    
+    for rect in rects:
+        shape = predictor(gray, rect)
+        shape = face_utils.shape_to_np(shape)
+        
+        if not verificar_qualidade_deteccao(shape, frame.shape):
+            continue
+            
+        # Processamento dos olhos com área expandida
+        olho_esquerdo = expandir_roi(shape[l_inicio:l_fim], FATOR_EXPANSAO_OLHO)
+        olho_direito = expandir_roi(shape[r_inicio:r_fim], FATOR_EXPANSAO_OLHO)
+        
+        ear_esquerdo = calcular_ear(olho_esquerdo)
+        ear_direito = calcular_ear(olho_direito)
+        
+        if ear_esquerdo is None or ear_direito is None:
+            continue
+            
+        ear_medio = (ear_esquerdo + ear_direito) / 2.0
+        ear_buffer.append(ear_medio)
+        
+        # Suavização usando média móvel
+        ear_suavizado = np.mean(ear_buffer) if ear_buffer else ear_medio
+        
+        # Processamento da boca
+        boca = shape[boca_inicio:boca_fim]
+        mar = calcular_mar(boca)
+        
+        if mar is not None:
+            mar_buffer.append(mar)
+            mar_suavizado = np.mean(mar_buffer) if mar_buffer else mar
+        
+        # Desenho dos contornos
+        olho_esquerdo_hull = cv2.convexHull(olho_esquerdo)
+        olho_direito_hull = cv2.convexHull(olho_direito)
+        boca_hull = cv2.convexHull(boca)
+        
+        cv2.drawContours(frame, [olho_esquerdo_hull], -1, (0, 255, 255), 2)
+        cv2.drawContours(frame, [olho_direito_hull], -1, (0, 255, 255), 2)
+        cv2.drawContours(frame, [boca_hull], -1, (255, 0, 0), 2)
+        
+        # Detecção robusta de sonolência
+        if ear_suavizado < FECHAMENTO_OLHAR_THRESH:
+            contador_fechamento += 1
+            
+            # Requer múltiplos frames consecutivos para evitar falsos positivos
+            if contador_fechamento >= 10 and time.time() - ultimo_alerta > 5:
+                cv2.putText(frame, "ALERTA: SONOLENCIA DETECTADA!", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                alerta_sonolencia = True
+                ultimo_alerta = time.time()
+                if alerta_sonoro:
+                    alerta_sonoro.play()
+        else:
+            contador_fechamento = max(0, contador_fechamento - 1)
+            alerta_sonolencia = False
+            
+        # Detecção de bocejo com verificação adicional
+        if mar is not None and mar_suavizado > BOCEJO_THRESH:
+            contador_bocejo += 1
+            
+            if contador_bocejo >= 15 and time.time() - ultimo_alerta > 5:
+                cv2.putText(frame, "ALERTA: BOCEJO DETECTADO!", (10, 60),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                alerta_sonolencia = True
+                ultimo_alerta = time.time()
+                if alerta_sonoro:
+                    alerta_sonoro.play()
+        else:
+            contador_bocejo = max(0, contador_bocejo - 1)
+        
+        # Exibir informações
+        cv2.putText(frame, f"EAR: {ear_suavizado:.2f}", (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        if mar is not None:
+            cv2.putText(frame, f"MAR: {mar_suavizado:.2f}", (10, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    
+    cv2.imshow("Detector de Sonolencia Aprimorado", frame)
+    
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
